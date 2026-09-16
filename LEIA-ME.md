@@ -51,16 +51,26 @@ encontrar. Se o `suntrack` fosse falhar por falta de medidor, o boot já avisa.
 
 ## Instalar
 
-Suba `install.lua` no <https://pastebin.com> e, no computador dentro do jogo:
+O código vive em <https://github.com/marcelin1555/helios-cc>. No computador
+dentro do jogo:
 
 ```
-pastebin run <codigo>
+wget run https://raw.githubusercontent.com/marcelin1555/helios-cc/main/install.lua
 ```
 
-Isso grava `pgapi.lua`, `pgmon.lua` e `suntrack.lua` no computador. Um paste só.
+Isso grava todos os arquivos do sistema no computador, na ordem certa. Reinicie
+com `Ctrl+R` para ver o HELIOS subir.
 
-Se preferir sem pastebin, `wget <url> install.lua` e depois `install` funciona igual —
-qualquer URL que devolva texto puro serve (HTTP já está habilitado no perfil).
+Funciona em qualquer mundo/servidor com a API `http` do CC habilitada — o
+`raw.githubusercontent.com` não pede autenticação, então serve tanto para o
+save local quanto para um servidor de terceiros. Se preferir sem baixar toda
+vez, `wget https://raw.githubusercontent.com/marcelin1555/helios-cc/main/install.lua install.lua`
+salva o arquivo e depois `install` roda quantas vezes quiser.
+
+### Atualizar
+
+Depois de mudar algo no repositório, rode o mesmo `wget run` de novo — ele
+sobrescreve os arquivos existentes.
 
 ## O que o PowerGrid expõe ao computador
 
