@@ -24,7 +24,16 @@ pgapi.TYPE = {
   energy   = "powergrid_energy_meter",
   clutch   = "powergrid_generator_clutch",
   redstone = "powergrid_redstone_converter",
+  -- Redstone Relay do proprio CC:Tweaked: um bloco com Wired Modem que leva
+  -- redstone pela rede de cabo. E o que permite colar embreagem e cambio
+  -- longe do computador, na mesma rede do medidor - sem ele, redstone so
+  -- funciona encostado ou por fio de redstone comum.
+  relay    = "redstone_relay",
 }
+
+-- tipos que sao medidores de geracao, na ordem de preferencia (potencia e
+-- corrente acompanham a irradiancia; tensao quase nao muda com a luz)
+pgapi.MEDIDORES = { "power", "current", "voltage" }
 
 -- categoria por tipo, para a varredura
 local CAT = {}
@@ -117,6 +126,42 @@ function pgapi.readEnergyMeter(entry)
   if e == nil then e = pgapi.try(d, "getValue") end
   if e == nil then return nil end
   return { energy = e, max = pgapi.try(d, "maxRange") }
+end
+
+local UNIDADE = { power = "W", current = "A", voltage = "V" }
+
+--- Escolhe qual grupo de medidor usar para acompanhar a geracao.
+-- nome == "auto" ou nil: prefere potencia, depois corrente, depois tensao.
+-- nome == algo especifico: usa so o periferico com esse nome, em qualquer
+-- categoria de medidor - devolve lista de 1 item.
+-- @return lista, categoria ("power"/"current"/"voltage"), unidade
+function pgapi.escolherMedidor(scan, nome)
+  if nome and nome ~= "" and nome ~= "auto" then
+    for _, cat in ipairs(pgapi.MEDIDORES) do
+      for _, e in ipairs(scan[cat]) do
+        if e.name == nome then return { e }, cat, UNIDADE[cat] end
+      end
+    end
+    return {}, nil, ""
+  end
+
+  for _, cat in ipairs(pgapi.MEDIDORES) do
+    if #scan[cat] > 0 then return scan[cat], cat, UNIDADE[cat] end
+  end
+  return {}, nil, ""
+end
+
+--- Acha um periferico monitor pelo nome, ou o primeiro disponivel.
+-- nome == "auto"/"nenhum"/nil: primeiro monitor achado (ou nenhum, para "nenhum").
+function pgapi.escolherMonitor(scan, nome)
+  if nome == "nenhum" then return nil end
+  if nome and nome ~= "" and nome ~= "auto" then
+    for _, e in ipairs(scan.monitor) do
+      if e.name == nome then return e end
+    end
+    return nil
+  end
+  return scan.monitor[1]
 end
 
 --- Soma a potencia gerada/consumida vista por todos os medidores de potencia.

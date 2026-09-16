@@ -1,7 +1,7 @@
 --[[ install - instalador do sistema HELIOS ]]
 
 local ARQUIVOS = {}
-local ORDEM = { "pgapi.lua", "ui.lua", "pixel.lua", "palette.lua", "rendimento.lua", "clima.lua", "circuito.lua", "boot.lua", "pgmon.lua", "suntrack.lua", "painel.lua", "soldemo.lua", "startup.lua" }
+local ORDEM = { "pgapi.lua", "ui.lua", "config.lua", "pixel.lua", "palette.lua", "rendimento.lua", "clima.lua", "circuito.lua", "boot.lua", "pgmon.lua", "suntrack.lua", "painel.lua", "configurar.lua", "soldemo.lua", "startup.lua" }
 ARQUIVOS["pgapi.lua"] = [=[
 --[[ pgapi - biblioteca de acesso aos perifericos do PowerGrid (CC:Tweaked)
      Usada por pgmon e suntrack.
@@ -29,7 +29,16 @@ pgapi.TYPE = {
   energy   = "powergrid_energy_meter",
   clutch   = "powergrid_generator_clutch",
   redstone = "powergrid_redstone_converter",
+  -- Redstone Relay do proprio CC:Tweaked: um bloco com Wired Modem que leva
+  -- redstone pela rede de cabo. E o que permite colar embreagem e cambio
+  -- longe do computador, na mesma rede do medidor - sem ele, redstone so
+  -- funciona encostado ou por fio de redstone comum.
+  relay    = "redstone_relay",
 }
+
+-- tipos que sao medidores de geracao, na ordem de preferencia (potencia e
+-- corrente acompanham a irradiancia; tensao quase nao muda com a luz)
+pgapi.MEDIDORES = { "power", "current", "voltage" }
 
 -- categoria por tipo, para a varredura
 local CAT = {}
@@ -122,6 +131,42 @@ function pgapi.readEnergyMeter(entry)
   if e == nil then e = pgapi.try(d, "getValue") end
   if e == nil then return nil end
   return { energy = e, max = pgapi.try(d, "maxRange") }
+end
+
+local UNIDADE = { power = "W", current = "A", voltage = "V" }
+
+--- Escolhe qual grupo de medidor usar para acompanhar a geracao.
+-- nome == "auto" ou nil: prefere potencia, depois corrente, depois tensao.
+-- nome == algo especifico: usa so o periferico com esse nome, em qualquer
+-- categoria de medidor - devolve lista de 1 item.
+-- @return lista, categoria ("power"/"current"/"voltage"), unidade
+function pgapi.escolherMedidor(scan, nome)
+  if nome and nome ~= "" and nome ~= "auto" then
+    for _, cat in ipairs(pgapi.MEDIDORES) do
+      for _, e in ipairs(scan[cat]) do
+        if e.name == nome then return { e }, cat, UNIDADE[cat] end
+      end
+    end
+    return {}, nil, ""
+  end
+
+  for _, cat in ipairs(pgapi.MEDIDORES) do
+    if #scan[cat] > 0 then return scan[cat], cat, UNIDADE[cat] end
+  end
+  return {}, nil, ""
+end
+
+--- Acha um periferico monitor pelo nome, ou o primeiro disponivel.
+-- nome == "auto"/"nenhum"/nil: primeiro monitor achado (ou nenhum, para "nenhum").
+function pgapi.escolherMonitor(scan, nome)
+  if nome == "nenhum" then return nil end
+  if nome and nome ~= "" and nome ~= "auto" then
+    for _, e in ipairs(scan.monitor) do
+      if e.name == nome then return e end
+    end
+    return nil
+  end
+  return scan.monitor[1]
 end
 
 --- Soma a potencia gerada/consumida vista por todos os medidores de potencia.
@@ -389,6 +434,277 @@ function Tela:menu(y0, itens, titulo)
 end
 
 return ui]=]
+ARQUIVOS["config.lua"] = [=[
+--[[ config - o lugar unico de configuracao do HELIOS
+
+  Tudo que depende da SUA montagem mora em /helios.cfg: qual medidor ler, em que
+  rele e lado estao a embreagem e o cambio, qual monitor usar, quantos paineis
+  existem e os ajustes finos do rastreio.
+
+  O arquivo e Lua comentado. Da para editar na mao com `edit helios.cfg`, mas o
+  jeito facil e rodar `configurar`, que lista o que existe na rede.
+
+    local config = require("config")
+    local cfg = config.ler()      -- nunca falha: sem arquivo, usa o padrao
+    config.salvar(cfg)
+
+  Quem ja tinha suntrack.cfg / painel.cfg (versao antiga) nao perde a montagem:
+  sem helios.cfg, eles sao lidos e convertidos.
+]]
+
+local config = {}
+
+config.ARQUIVO = "/helios.cfg"
+
+config.LADOS = { "top", "bottom", "left", "right", "front", "back" }
+
+--- "computador" usa o redstone do proprio computador; qualquer outro valor e o
+-- nome de um redstone_relay na rede de cabo.
+config.COMPUTADOR = "computador"
+config.NENHUM = "nenhum"
+config.AUTO = "auto"
+
+local function padrao()
+  return {
+    medidor = config.AUTO,
+    monitor = config.AUTO,
+    embreagem = {
+      rele = config.COMPUTADOR,
+      lado = "back",
+      invertida = false,
+      analogica = false,
+      nivelGiro = 0,
+    },
+    cambio = {
+      rele = config.NENHUM,
+      lado = "top",
+    },
+    paineis = 0,
+    rastreio = {
+      pulso = 0.30,
+      assentar = 0.60,
+      amostras = 3,
+      intervaloAmostra = 0.15,
+      conferir = 8,
+      bandaMorta = 0.02,
+      rearmar = 0.35,
+      confirmacoes = 3,
+      espera = 90,
+      volta = 24,
+      potenciaNoite = 0.5,
+      checagemNoite = 20,
+      bateriaCheia = 95,
+      bateriaRetoma = 88,
+    },
+  }
+end
+config.padrao = padrao
+
+--- Copia por cima do padrao so o que tem o mesmo tipo. Chave desconhecida ou
+-- valor de tipo errado e ignorado: um erro de digitacao no arquivo nao pode
+-- derrubar o rastreador, so voltar aquele item ao padrao.
+local function mesclar(base, novo)
+  if type(novo) ~= "table" then return base end
+  for k, v in pairs(base) do
+    local n = novo[k]
+    if type(v) == "table" then
+      mesclar(v, n)
+    elseif n ~= nil and type(n) == type(v) then
+      base[k] = n
+    end
+  end
+  return base
+end
+
+-- ------------------------------------------------------------------ leitura
+
+local function lerArquivo(caminho)
+  if not fs.exists(caminho) then return nil end
+  local f = fs.open(caminho, "r")
+  if not f then return nil end
+  local texto = f.readAll()
+  f.close()
+  -- ambiente vazio: o arquivo so pode devolver uma tabela, nao chamar nada
+  local fn = load(texto, "=" .. caminho, "t", {})
+  if not fn then return nil, "helios.cfg com erro de sintaxe" end
+  local ok, t = pcall(fn)
+  if not ok or type(t) ~= "table" then return nil, "helios.cfg nao devolve uma tabela" end
+  return t
+end
+
+--- Le suntrack.cfg / painel.cfg da versao antiga (chave=valor).
+local function lerLegado()
+  local function pares(caminho)
+    if not fs.exists(caminho) then return nil end
+    local f = fs.open(caminho, "r")
+    if not f then return nil end
+    local t = {}
+    while true do
+      local linha = f.readLine()
+      if not linha then break end
+      local k, v = linha:match("^%s*([%w_]+)%s*=%s*([%w%.%-_]+)%s*$")
+      if k then t[k] = tonumber(v) or v end
+    end
+    f.close()
+    return t
+  end
+
+  local s = pares("/suntrack.cfg")
+  local p = pares("/painel.cfg")
+  if not s and not p then return nil end
+
+  local cfg = padrao()
+  s = s or {}
+  if s.clutchSide then cfg.embreagem.lado = s.clutchSide end
+  if s.gearSide and s.gearSide ~= "" then
+    cfg.cambio.rele = config.COMPUTADOR
+    cfg.cambio.lado = s.gearSide
+  end
+  cfg.embreagem.invertida = (s.invertClutch == 1)
+  cfg.embreagem.analogica = (s.clutchAnalog == 1)
+  if type(s.runLevel) == "number" then cfg.embreagem.nivelGiro = s.runLevel end
+
+  local mapa = {
+    pulse = "pulso", settle = "assentar", samples = "amostras",
+    sampleGap = "intervaloAmostra", holdCheck = "conferir",
+    deadband = "bandaMorta", reacquire = "rearmar", confirma = "confirmacoes",
+    cooldown = "espera", sweepTime = "volta", nightPower = "potenciaNoite",
+    nightCheck = "checagemNoite", battFull = "bateriaCheia",
+    battResume = "bateriaRetoma",
+  }
+  for velho, novo in pairs(mapa) do
+    if type(s[velho]) == "number" then cfg.rastreio[novo] = s[velho] end
+  end
+
+  if p and type(p.paineis) == "number" then cfg.paineis = p.paineis end
+  return cfg
+end
+
+--- Le a configuracao. Nunca falha.
+-- @return cfg, origem ("arquivo" | "legado" | "padrao"), aviso ou nil
+function config.ler()
+  local t, erro = lerArquivo(config.ARQUIVO)
+  if t then return mesclar(padrao(), t), "arquivo" end
+
+  local legado = lerLegado()
+  if legado then
+    -- migra de uma vez: helios.cfg passa a ser a fonte da verdade, e o
+    -- resultado nao fica preso a suntrack.cfg/painel.cfg sobrevivendo por ai
+    config.salvar(legado)
+    return legado, "legado", erro
+  end
+
+  return padrao(), "padrao", erro
+end
+
+-- ------------------------------------------------------------------ escrita
+
+local function q(s) return string.format("%q", tostring(s)) end
+local function b(v) return v and "true" or "false" end
+local function n(v) return tostring(v) end
+
+--- Grava o arquivo comentado, na ordem em que faz sentido ler.
+function config.salvar(cfg)
+  local e, c, r = cfg.embreagem, cfg.cambio, cfg.rastreio
+  local linhas = {
+    "-- HELIOS - configuracao da montagem",
+    "-- Gerado por 'configurar'. Pode editar na mao; valor invalido volta ao padrao.",
+    "return {",
+    "  -- medidor na saida do bearing: nome do periferico ou \"auto\"",
+    "  medidor = " .. q(cfg.medidor) .. ",",
+    "",
+    "  -- monitor do painel: nome, \"auto\" ou \"nenhum\"",
+    "  monitor = " .. q(cfg.monitor) .. ",",
+    "",
+    "  -- embreagem (Clutch do Create): redstone trava o painel",
+    "  embreagem = {",
+    "    rele = " .. q(e.rele) .. ",   -- redstone_relay_N, ou \"computador\"",
+    "    lado = " .. q(e.lado) .. ",",
+    "    invertida = " .. b(e.invertida) .. ",   -- true se ha tocha invertendo",
+    "    analogica = " .. b(e.analogica) .. ",   -- true para Generator Clutch",
+    "    nivelGiro = " .. n(e.nivelGiro) .. ",   -- so analogica: 0 = torque total",
+    "  },",
+    "",
+    "  -- cambio (Gearshift): redstone inverte o sentido",
+    "  cambio = {",
+    "    rele = " .. q(c.rele) .. ",   -- redstone_relay_N, \"computador\" ou \"nenhum\"",
+    "    lado = " .. q(c.lado) .. ",",
+    "  },",
+    "",
+    "  -- quantos paineis no bearing; 0 = nao compara com o catalogo",
+    "  paineis = " .. n(cfg.paineis) .. ",",
+    "",
+    "  -- ajuste fino do rastreio (segundos, fracoes de 0 a 1, ou %)",
+    "  rastreio = {",
+    "    pulso = " .. n(r.pulso) .. ",",
+    "    assentar = " .. n(r.assentar) .. ",",
+    "    amostras = " .. n(r.amostras) .. ",",
+    "    intervaloAmostra = " .. n(r.intervaloAmostra) .. ",",
+    "    conferir = " .. n(r.conferir) .. ",",
+    "    bandaMorta = " .. n(r.bandaMorta) .. ",",
+    "    rearmar = " .. n(r.rearmar) .. ",",
+    "    confirmacoes = " .. n(r.confirmacoes) .. ",",
+    "    espera = " .. n(r.espera) .. ",",
+    "    volta = " .. n(r.volta) .. ",   -- segundos de uma volta completa",
+    "    potenciaNoite = " .. n(r.potenciaNoite) .. ",",
+    "    checagemNoite = " .. n(r.checagemNoite) .. ",",
+    "    bateriaCheia = " .. n(r.bateriaCheia) .. ",",
+    "    bateriaRetoma = " .. n(r.bateriaRetoma) .. ",",
+    "  },",
+    "}",
+    "",
+  }
+  local f = fs.open(config.ARQUIVO, "w")
+  if not f then return false end
+  f.write(table.concat(linhas, "\n"))
+  f.close()
+  return true
+end
+
+--- Descricao curta de uma saida, para telas: "redstone_relay_0 top".
+function config.descrever(saida)
+  if not saida or saida.rele == config.NENHUM then return "nenhum" end
+  return saida.rele .. " " .. saida.lado
+end
+
+-- --------------------------------------------------------------- redstone
+
+--- O alvo real de uma saida: a API nativa "redstone", ou o periferico
+-- Redstone Relay colado na rede de cabo. E o relay que permite a embreagem
+-- e o cambio ficarem longe do computador, na mesma rede do medidor.
+local function alvo(saida)
+  if not saida or saida.rele == config.NENHUM then return nil end
+  if saida.rele == config.COMPUTADOR then return redstone end
+  return peripheral.wrap(saida.rele)
+end
+
+--- Liga/desliga um sinal booleano num lado (usado pelo cambio).
+function config.setBool(saida, ligado)
+  local t = alvo(saida)
+  if not t then return false end
+  return pcall(t.setOutput, saida.lado, ligado == true)
+end
+
+--- Sinal de 0 a 15 (usado pela embreagem, que pode ser analogica).
+-- invertida troca o sentido do sinal, para quem tem uma tocha no caminho.
+function config.setNivel(saida, nivel)
+  local t = alvo(saida)
+  if not t then return false end
+  nivel = math.max(0, math.min(15, tonumber(nivel) or 0))
+  if saida.invertida then nivel = 15 - nivel end
+  if saida.analogica then
+    return pcall(t.setAnalogOutput, saida.lado, nivel)
+  end
+  return pcall(t.setOutput, saida.lado, nivel > 0)
+end
+
+--- A saida esta configurada e o alvo existe na rede agora?
+function config.saidaOk(saida)
+  if not saida or saida.rele == config.NENHUM then return true end -- opcional
+  return alvo(saida) ~= nil
+end
+
+return config]=]
 ARQUIVOS["pixel.lua"] = [=[
 --[[ pixel - framebuffer subpixel 2x3 para CC:Tweaked
 
@@ -1416,7 +1732,8 @@ local function loadLib(name)
   error("Falta a biblioteca " .. name .. ".lua (coloque na mesma pasta)", 0)
 end
 
-local pgapi = loadLib("pgapi")
+local pgapi  = loadLib("pgapi")
+local config = loadLib("config")
 
 local REFRESH  = 0.5   -- segundos entre leituras
 local HIST_MAX = 300   -- amostras guardadas do historico de potencia
@@ -1424,11 +1741,14 @@ local HIST_MAX = 300   -- amostras guardadas do historico de potencia
 -- ------------------------------------------------------------------- display
 
 local args = { ... }
+local cfg = config.ler()
 local scan = pgapi.scan()
 
+local monitorEscolhido = pgapi.escolherMonitor(scan, cfg.monitor)
+
 local out, isMonitor
-if #scan.monitor > 0 then
-  out, isMonitor = scan.monitor[1].dev, true
+if monitorEscolhido then
+  out, isMonitor = monitorEscolhido.dev, true
   pcall(out.setTextScale, tonumber(args[1]) or 0.5)
 else
   out, isMonitor = term.current(), false
@@ -1720,14 +2040,15 @@ ARQUIVOS["suntrack.lua"] = [=[
     Embreagem (Clutch):  sinal de redstone -> para de transmitir rotacao.
     Cambio (Gearshift):  sinal de redstone -> inverte o sentido.
 
-    O computador tem saida de redstone nativa, entao esses dois blocos
-    nao precisam de modem nem de periferico. So o medidor precisa.
-
-  COMO ACHA A MELHOR POSICAO
-    O bearing nao e um periferico - nao da para ler o angulo do painel.
-    Entao o programa usa a propria geracao como realimentacao: gira um
-    pouco, mede, e se piorou inverte o sentido. E o mesmo metodo
-    "perturb & observe" dos rastreadores solares de verdade.
+  REDSTONE PELA REDE
+    Clutch e Gearshift do Create nao sao perifericos - um Wired Modem colado
+    neles nao expoe nada ao computador. O que os alcanca de longe e o
+    Redstone Relay do proprio CC:Tweaked: um bloco com Wired Modem que leva
+    redstone pela mesma rede de cabo do medidor. Cole um relay em cada bloco
+    (ou um so, se os dois estiverem perto) e rode 'configurar' para dizer
+    qual relay e qual lado e cada coisa. Sem relay, ainda da para usar o
+    redstone nativo do computador (rele "computador"), mas ai a embreagem
+    precisa estar encostada nele ou ligada por fio de redstone comum.
 
   MONTAGEM
     1. Uma fonte de rotacao do Create (motor, moinho, o que preferir).
@@ -1735,12 +2056,12 @@ ARQUIVOS["suntrack.lua"] = [=[
     2. Gearshift no eixo (opcional, mas recomendado) - inverte o sentido.
     3. Clutch no eixo, depois do gearshift - liga e desliga a rotacao.
     4. O eixo entra no Solar Panel Bearing, que gira os paineis.
-    5. Um medidor no circuito eletrico do bearing, ligado ao computador
-       com Wired Modem + Networking Cable. Prefira o CURRENT GAUGE: ele
-       tem 2 terminais e vai em serie, enquanto o Power Gauge tem 3
-       (shunt em serie + referencia de tensao). Para rastrear o sol a
-       corrente serve tao bem quanto a potencia - num painel solar ela
-       acompanha a irradiancia quase proporcionalmente.
+    5. Um medidor no circuito eletrico do bearing, ligado por Wired Modem +
+       Networking Cable. Prefira o CURRENT GAUGE: ele tem 2 terminais e vai
+       em serie, enquanto o Power Gauge tem 3 (shunt em serie + referencia
+       de tensao). Para rastrear o sol a corrente serve tao bem quanto a
+       potencia - num painel solar ela acompanha a irradiancia quase
+       proporcionalmente.
 
        O medidor tem terminal + e -, e vai EM SERIE: a corrente entra
        pelo + e sai pelo -. A cadeia fica assim:
@@ -1754,22 +2075,23 @@ ARQUIVOS["suntrack.lua"] = [=[
        corrente e o medidor le zero. Ligar os dois terminais do gauge no
        mesmo polo e curto-circuito - o gauge tem resistencia quase zero e
        queima.
-    6. O computador precisa alcancar o clutch e o gearshift com redstone
-       (encostado, ou por fio de redstone saindo do lado configurado).
+    6. Redstone Relay + Wired Modem colado na embreagem, e outro no cambio
+       (ou reaproveite o mesmo relay se dois lados dele alcancarem os dois
+       blocos). Ligue ambos na mesma rede de cabo do medidor.
 
   ATENCAO AO ESTADO SEGURO
-    O Clutch do Create para quando RECEBE redstone. Entao, com o
-    computador desligado, o padrao e o painel girar sem parar. Se isso
-    incomodar, ponha uma tocha de redstone invertendo o sinal entre o
-    computador e o clutch, e ponha invertClutch=1 no suntrack.cfg -
-    ai "computador desligado" passa a significar "painel travado".
+    O Clutch do Create para quando RECEBE redstone. Entao, com o computador
+    desligado, o padrao e o painel girar sem parar. Se isso incomodar, ponha
+    uma tocha de redstone invertendo o sinal entre o rele e o clutch, e marque
+    "ha uma tocha invertendo o sinal" em 'configurar' - ai "computador
+    desligado" passa a significar "painel travado".
 
   USO
-    suntrack lados       descobre em que lado esta cada redstone link
-    suntrack testar      confere a montagem - rode este primeiro
-    suntrack             roda o rastreador
-    suntrack varrer      da uma volta medindo e mostra o pico
-    suntrack parar       trava o painel e sai
+    configurar           assistente que descobre a rede e escreve helios.cfg
+    suntrack testar       confere a montagem - rode depois de configurar
+    suntrack              roda o rastreador
+    suntrack varrer        da uma volta medindo e mostra o pico
+    suntrack parar         trava o painel e sai
     Tecla Q encerra e trava o painel.
 ]]
 
@@ -1782,65 +2104,22 @@ local function loadLib(name)
   error("Falta a biblioteca " .. name .. ".lua (coloque na mesma pasta)", 0)
 end
 
-local pgapi = loadLib("pgapi")
-local uilib = loadLib("ui")
-local clima = loadLib("clima")
+local pgapi   = loadLib("pgapi")
+local uilib   = loadLib("ui")
+local clima   = loadLib("clima")
+local config  = loadLib("config")
 
 -- ------------------------------------------------------------------ ajustes
 
-local CONF = {
-  clutchSide   = "back",  -- lado do computador que vai ate a embreagem
-  gearSide     = "",      -- lado que vai ate o cambio ("" = sem cambio)
-  invertClutch = 0,       -- 1 se houver uma tocha invertendo o sinal
-  clutchAnalog = 0,       -- 1 para sinal analogico (Generator Clutch)
-  runLevel     = 0,       -- nivel ao girar; so com clutchAnalog=1.
-                          -- 0 = torque total. 8 = metade, gira mais devagar.
-  pulse        = 0.30,    -- segundos girando em cada passo fino
-  settle       = 0.60,    -- espera depois do passo, para a leitura assentar
-  samples      = 3,       -- leituras promediadas por medicao
-  sampleGap    = 0.15,    -- intervalo entre leituras
-  holdCheck    = 8,       -- segundos entre conferidas quando esta alinhado
-  deadband     = 0.02,    -- 2% - queda menor que isso e ruido, nao desalinho
-  reacquire    = 0.35,    -- so procura de novo se cair 35% abaixo do pico.
-                          -- 12% disparava a toa: de manha e de tarde a queda
-                          -- e do sol no ceu, e girar nao traz de volta.
-  confirma     = 3,       -- leituras baixas seguidas antes de acreditar
-  cooldown     = 90,      -- segundos minimos entre duas varreduras completas
-  sweepTime    = 24,      -- segundos de uma volta completa do bearing
-  nightPower   = 0.5,     -- watts abaixo disso conta como sem sol
-  nightCheck   = 20,      -- segundos entre conferidas durante a noite
-  battFull     = 95,      -- % de carga que conta como bateria cheia
-  battResume   = 88,      -- % em que volta a rastrear
-  cfgFile      = "suntrack.cfg",
-}
+local cfg, origemCfg, avisoCfg = config.ler()
+local R = cfg.rastreio
 
--- suntrack.cfg pode sobrescrever qualquer ajuste acima, ex:  pulse=0.5
-if fs.exists(CONF.cfgFile) then
-  local f = fs.open(CONF.cfgFile, "r")
-  for line in f.readLine do
-    local k, v = line:match("^%s*([%w_]+)%s*=%s*([%w%.%-]+)%s*$")
-    if k and CONF[k] ~= nil then CONF[k] = tonumber(v) or v end
-  end
-  f.close()
-end
-
-local temCambio = CONF.gearSide ~= nil and CONF.gearSide ~= ""
+local temCambio = cfg.cambio.rele ~= config.NENHUM
 
 -- ------------------------------------------------------------------ hardware
 
 local scan = pgapi.scan()
-
--- Ordem de preferencia do medidor. Potencia e corrente acompanham a
--- irradiancia; tensao quase nao muda com a luz (a Voc de um painel varia
--- de forma logaritmica), entao so serve se a carga for um resistor fixo,
--- onde V = I*R. Com bateria a tensao fica presa e o rastreador cega.
-local meterList, meterKind = scan.power, "power"
-if #meterList == 0 then
-  meterList, meterKind = scan.current, "current"
-end
-if #meterList == 0 then
-  meterList, meterKind = scan.voltage, "voltage"
-end
+local meterList, meterKind, meterUnit = pgapi.escolherMedidor(scan, cfg.medidor)
 local medidorFraco = (meterKind == "voltage")
 
 local function abortar(msg)
@@ -1858,9 +2137,17 @@ local function abortar(msg)
 end
 
 if #meterList == 0 then
+  if cfg.medidor ~= config.AUTO and cfg.medidor ~= "" then
+    abortar("O medidor configurado (\"" .. cfg.medidor .. "\") nao foi encontrado.\n" ..
+            "Rode 'configurar' de novo para escolher outro.")
+  end
   abortar("Nao achei medidor nenhum (power, current ou voltage gauge).\n" ..
           "Preciso de um no circuito do bearing para saber se melhorou.\n" ..
           "Ligue um com Wired Modem + cabo, e clique no modem para ativar.")
+end
+
+if avisoCfg then
+  print("aviso: " .. avisoCfg)
 end
 
 --- Potencia (ou corrente) somada de todos os medidores.
@@ -1895,8 +2182,7 @@ local cheiaAgora = false
 local function bateriaCheia()
   local carga = cargaBateria()
   if not carga then return false end
-  local limite = cheiaAgora and (tonumber(CONF.battResume) or 88)
-                            or (tonumber(CONF.battFull) or 95)
+  local limite = cheiaAgora and R.bateriaRetoma or R.bateriaCheia
   cheiaAgora = carga >= limite
   return cheiaAgora
 end
@@ -1904,53 +2190,30 @@ end
 --- Media de varias leituras, para nao decidir em cima de ruido.
 local function measure()
   local sum = 0
-  for i = 1, CONF.samples do
+  for i = 1, R.amostras do
     sum = sum + readNow()
-    if i < CONF.samples then sleep(CONF.sampleGap) end
+    if i < R.amostras then sleep(R.intervaloAmostra) end
   end
-  return sum / CONF.samples
+  return sum / R.amostras
 end
 
 -- ------------------------------------------------------------------- motor
 
---- Embreagem: sinal de redstone TRAVA, ausencia de sinal libera - vale tanto
--- para o Clutch do Create quanto para o Generator Clutch do PowerGrid.
--- O Generator Clutch ainda entende nivel analogico: sinal cheio nao passa
--- rotacao nenhuma, sinal parcial limita o torque. Com clutchAnalog=1 da para
--- girar mais devagar sem precisar baixar o RPM da fonte.
--- invertClutch=1 e para quem pos uma tocha invertendo o sinal no caminho.
-local function setClutch(girando)
-  local nivel = 15
-  if girando then nivel = math.max(0, math.min(15, tonumber(CONF.runLevel) or 0)) end
-  if tonumber(CONF.invertClutch) == 1 then nivel = 15 - nivel end
-  if tonumber(CONF.clutchAnalog) == 1 then
-    pcall(redstone.setAnalogOutput, CONF.clutchSide, nivel)
-  else
-    pcall(redstone.setOutput, CONF.clutchSide, nivel > 0)
-  end
-end
-
---- O Gearshift inverte o sentido quando recebe redstone.
-local function setSentido(dir)
-  if not temCambio then return end
-  pcall(redstone.setOutput, CONF.gearSide, dir < 0)
-end
-
 local function motorStop()
-  setClutch(false)
+  config.setNivel(cfg.embreagem, 15)   -- sinal cheio trava
 end
 
 local function motorStart(dir)
-  setSentido(dir)
-  setClutch(true)
+  if temCambio then config.setBool(cfg.cambio, dir < 0) end
+  config.setNivel(cfg.embreagem, cfg.embreagem.nivelGiro)
 end
 
 --- Um passo de rotacao: solta, espera, trava, deixa assentar.
 local function step(dir, dur)
   motorStart(dir)
-  sleep(dur or CONF.pulse)
+  sleep(dur or R.pulso)
   motorStop()
-  sleep(CONF.settle)
+  sleep(R.assentar)
 end
 
 -- deixar o painel girando depois que o programa morre seria pessimo
@@ -1974,10 +2237,6 @@ local best, current, dir = 0, 0, 1
 local tela = uilib.tela(term.current())
 local UC = tela.C
 
-local function unidade()
-  return ({ power = "W", current = "A", voltage = "V" })[meterKind] or ""
-end
-
 local function corDaFracao(f)
   if f >= 0.9 then return UC.bom end
   if f >= 0.7 then return UC.atencao end
@@ -1985,7 +2244,6 @@ local function corDaFracao(f)
 end
 
 local function desenhar()
-  local u = unidade()
   tela:limpar()
   tela:cabecalho("suntrack", pgapi.gameClock() ..
                  (pgapi.isDaytime() and " dia" or " noite"))
@@ -1996,15 +2254,15 @@ local function desenhar()
 
   -- geracao atual, com barra relativa ao melhor do dia
   local frac = (best > 0) and (current / best) or 0
-  tela:linha(6, "agora", pgapi.fmt(current, u), UC.acento)
+  tela:linha(6, "agora", pgapi.fmt(current, meterUnit), UC.acento)
   tela:barra(2, 7, tela.w - 2, frac * 100, corDaFracao(frac))
-  tela:linha(8, "melhor hoje", pgapi.fmt(best, u))
+  tela:linha(8, "melhor hoje", pgapi.fmt(best, meterUnit))
 
   tela:linha(10, "sentido", (dir > 0 and "->" or "<-") ..
              (temCambio and "" or "  (so um)"))
-  tela:linha(11, "embreagem", CONF.clutchSide ..
-             (tonumber(CONF.clutchAnalog) == 1 and "  analog" or ""))
-  tela:linha(12, "cambio", temCambio and CONF.gearSide or "nenhum")
+  tela:linha(11, "embreagem", config.descrever(cfg.embreagem) ..
+             (cfg.embreagem.analogica and "  analog" or ""))
+  tela:linha(12, "cambio", config.descrever(cfg.cambio))
 
   local nome = meterList[1].name
   if #meterList > 1 then nome = nome .. " +" .. (#meterList - 1) end
@@ -2020,12 +2278,12 @@ local function desenhar()
   local carga = cargaBateria()
   if carga then
     tela:linha(15, "bateria", string.format("%.0f%%", carga),
-               carga >= (tonumber(CONF.battFull) or 95) and UC.atencao or UC.bom)
+               carga >= R.bateriaCheia and UC.atencao or UC.bom)
   end
 
   if medidorFraco then
-    tela:texto(2, 15, "! tensao quase nao muda com a luz", UC.atencao)
-    tela:texto(2, 16, "  so serve com carga resistiva fixa", UC.fraco)
+    tela:texto(2, 17, "! tensao quase nao muda com a luz", UC.atencao)
+    tela:texto(2, 18, "  so serve com carga resistiva fixa", UC.fraco)
   end
 
   tela:rodape(" q encerra e trava o painel ")
@@ -2045,7 +2303,7 @@ local function sweep()
   local peak = 0
   local t0 = os.clock()
   motorStart(dir)
-  while os.clock() - t0 < CONF.sweepTime do
+  while os.clock() - t0 < R.volta do
     current = readNow()
     if current > peak then peak = current end
     best = peak
@@ -2053,7 +2311,7 @@ local function sweep()
     sleep(0.2)
   end
   motorStop()
-  sleep(CONF.settle)
+  sleep(R.assentar)
   return peak
 end
 
@@ -2061,7 +2319,7 @@ end
 local function goToPeak(peak, tol)
   tol = tol or 0.95
   setState("posicionando", string.format("indo para %.0f%% do pico", tol * 100))
-  local limit = os.clock() + CONF.sweepTime * 1.5
+  local limit = os.clock() + R.volta * 1.5
   while os.clock() < limit do
     current = measure()
     if current >= peak * tol then
@@ -2082,7 +2340,7 @@ local function refine()
   local after = measure()
   current = after
 
-  if after < before * (1 - CONF.deadband) then
+  if after < before * (1 - R.bandaMorta) then
     if temCambio then
       dir = -dir
       setState("ajustando", "piorou, invertendo o sentido")
@@ -2104,61 +2362,36 @@ local args = { ... }
 local cmd = args[1]
 
 if cmd == "lados" then
-  term.clear()
-  term.setCursorPos(1, 1)
-  print("=== descobrindo os lados ===")
-  print()
-  print("Vou ligar um lado de cada vez, 3s em cada um.")
-  print("Olhe os redstone links e anote qual acende")
-  print("em qual lado.")
-  print()
-
-  local lados = { "top", "bottom", "front", "back", "left", "right" }
-  local ok = pcall(function()
-    for _, lado in ipairs(lados) do
-      for _, l in ipairs(lados) do pcall(redstone.setOutput, l, false) end
-      pcall(redstone.setOutput, lado, true)
-      print("  ligado: " .. lado)
-      sleep(3)
-    end
-  end)
-  for _, l in ipairs(lados) do pcall(redstone.setOutput, l, false) end
-
-  print()
-  if not ok then
-    print("Interrompido. Todos os lados desligados.")
-    return
-  end
-  print("Todos desligados. Agora escreva no suntrack.cfg:")
-  print()
-  print("  clutchSide=<lado do link da embreagem>")
-  print("  gearSide=<lado do link do cambio>")
-  print()
-  print("Use 'edit suntrack.cfg' para criar o arquivo.")
+  print("O comando 'lados' virou parte do assistente.")
+  print("Rode 'configurar' - ele testa os lados e ja salva a escolha.")
   return
 end
 
 if cmd == "parar" then
   motorStop()
-  print("Painel travado (embreagem acionada no lado " .. CONF.clutchSide .. ").")
+  print("Painel travado (" .. config.descrever(cfg.embreagem) .. ").")
   return
 end
 
 if cmd == "testar" then
-  local unit = ({ power = "W", current = "A", voltage = "V" })[meterKind] or ""
   term.clear()
   term.setCursorPos(1, 1)
   print("=== teste de montagem ===")
   print()
-  print("embreagem no lado: " .. CONF.clutchSide)
-  print("cambio:            " .. (temCambio and CONF.gearSide or "nenhum"))
-  for _, e in ipairs(meterList) do print("medidor:           " .. e.name) end
+  print("embreagem: " .. config.descrever(cfg.embreagem) ..
+        (cfg.embreagem.analogica and " (analogica)" or ""))
+  print("cambio:    " .. config.descrever(cfg.cambio))
+  for _, e in ipairs(meterList) do print("medidor:   " .. e.name) end
+  if not config.saidaOk(cfg.embreagem) then
+    print()
+    print("aviso: o rele da embreagem nao foi encontrado na rede agora.")
+  end
   print()
 
   motorStop()
   sleep(1)
   local parado = measure()
-  print("travado, gerando " .. pgapi.fmt(parado, unit))
+  print("travado, gerando " .. pgapi.fmt(parado, meterUnit))
   if parado <= 0 then
     print("  aviso: o medidor esta lendo zero.")
     print("  E de noite? O medidor esta na saida do bearing?")
@@ -2177,7 +2410,7 @@ if cmd == "testar" then
       if v > maxv then maxv = v end
     end
     motorStop()
-    sleep(CONF.settle)
+    sleep(R.assentar)
     fim = true
   end)
 
@@ -2188,14 +2421,14 @@ if cmd == "testar" then
   end
 
   print()
-  print("variacao da geracao durante o giro: " .. pgapi.fmt(maxv - minv, unit))
+  print("variacao da geracao durante o giro: " .. pgapi.fmt(maxv - minv, meterUnit))
   print()
   if parado > 0 and (maxv - minv) < parado * 0.02 then
     print("A geracao quase nao mudou. Provaveis causas:")
-    print(" - o painel nao girou: falta torque chegando ao")
-    print("   bearing, ou a embreagem esta no lado errado")
-    print("   (ajuste clutchSide no suntrack.cfg)")
-    print(" - a embreagem esta invertida (invertClutch=1)")
+    print(" - o painel nao girou: falta torque chegando ao bearing,")
+    print("   ou a embreagem esta no rele/lado errado")
+    print("   (rode 'configurar' de novo)")
+    print(" - a embreagem esta invertida (marque isso em 'configurar')")
     print(" - o medidor nao esta na saida deste bearing")
   else
     print("Montagem OK - girar muda a geracao, que e do que")
@@ -2208,8 +2441,7 @@ if cmd == "varrer" then
   comCleanup(function()
     local peak = sweep()
     print()
-    print("Pico de geracao na volta completa: " ..
-          pgapi.fmt(peak, ({ power = "W", current = "A", voltage = "V" })[meterKind] or ""))
+    print("Pico de geracao na volta completa: " .. pgapi.fmt(peak, meterUnit))
   end)
   return
 end
@@ -2231,7 +2463,7 @@ local function tracker()
     ceu = clima.avaliar(current, pgapi.isDaytime())
 
     -- noite: painel travado, so confere de vez em quando
-    if not pgapi.isDaytime() and current < CONF.nightPower then
+    if not pgapi.isDaytime() and current < R.potenciaNoite then
       -- fecha o dia uma vez por noite: guarda o resumo e a tendencia
       if not diaFechado and diaN > 0 then
         clima.fecharDia({
@@ -2247,7 +2479,7 @@ local function tracker()
       motorStop()
       aligned = false
       best = 0
-      sleep(CONF.nightCheck)
+      sleep(R.checagemNoite)
 
     -- bateria cheia: a corrente cai porque a tensao dela encostou na do
     -- painel, nao porque o painel saiu de posicao. Nao adianta girar.
@@ -2255,7 +2487,7 @@ local function tracker()
       setState("bateria cheia", "nada a otimizar, painel travado")
       motorStop()
       aligned = false
-      sleep(CONF.nightCheck)
+      sleep(R.checagemNoite)
 
     -- ainda nao alinhado hoje: varredura completa para achar o maximo
     elseif not aligned then
@@ -2264,10 +2496,10 @@ local function tracker()
       end
       local peak = sweep()
       ultimaBusca = os.clock()
-      if peak < CONF.nightPower then
+      if peak < R.potenciaNoite then
         setState("sem sol", "geracao quase zero, esperando")
         motorStop()
-        sleep(CONF.nightCheck)
+        sleep(R.checagemNoite)
       else
         goToPeak(peak)
         aligned = true
@@ -2276,25 +2508,25 @@ local function tracker()
 
     -- alinhado: confere de tempos em tempos e corrige de leve
     else
-      sleep(CONF.holdCheck)
+      sleep(R.conferir)
       current = measure()
 
-      local limite = best * (1 - CONF.reacquire)
+      local limite = best * (1 - R.rearmar)
 
       if current < limite then
         -- Caiu muito. Antes de sair girando: nuvem passa sozinha, e o sol
         -- descendo nao volta por rotacao nenhuma. So vale girar se a queda
         -- persistir E se ja tiver passado tempo desde a ultima varredura.
         local baixas = 1
-        for _ = 2, (tonumber(CONF.confirma) or 3) do
+        for _ = 2, R.confirmacoes do
           setState("conferindo", "geracao caiu, vendo se e passageiro")
           sleep(3)
           current = measure()
           if current < limite then baixas = baixas + 1 end
         end
 
-        local persistiu = baixas >= (tonumber(CONF.confirma) or 3)
-        local esperou = (os.clock() - ultimaBusca) >= (tonumber(CONF.cooldown) or 90)
+        local persistiu = baixas >= R.confirmacoes
+        local esperou = (os.clock() - ultimaBusca) >= R.espera
         ceu = clima.avaliar(current, pgapi.isDaytime())
 
         if persistiu and not clima.valeGirar(ceu) then
@@ -2310,8 +2542,7 @@ local function tracker()
         elseif persistiu then
           -- e cedo para procurar de novo. baixa o alvo e continua parado,
           -- em vez de girar sem parar atras de energia que nao tem.
-          local falta = math.ceil((tonumber(CONF.cooldown) or 90)
-                                  - (os.clock() - ultimaBusca))
+          local falta = math.ceil(R.espera - (os.clock() - ultimaBusca))
           setState("aguardando", "queda real, mas so procuro em " .. falta .. "s")
           best = best * 0.97
         else
@@ -2371,27 +2602,24 @@ local palette  = lib("palette")
 local circuito = lib("circuito")
 local rendimento = lib("rendimento")
 local clima = lib("clima")
+local config = lib("config")
 
+local cfg = config.ler()
 local args = { ... }
 local scan = pgapi.scan()
 
 local tela = term.current()
-if args[1] ~= "pc" and #scan.monitor > 0 then
-  tela = scan.monitor[1].dev
-  pcall(tela.setTextScale, 0.5)
+if args[1] ~= "pc" then
+  local m = pgapi.escolherMonitor(scan, cfg.monitor)
+  if m then
+    tela = m.dev
+    pcall(tela.setTextScale, 0.5)
+  end
 end
 
 local fb = pixel.novo(tela)
 
---- Escolhe a melhor grandeza disponivel para representar a geracao.
-local function medidor()
-  if #scan.power > 0 then return scan.power, "power", "W" end
-  if #scan.current > 0 then return scan.current, "current", "A" end
-  if #scan.voltage > 0 then return scan.voltage, "voltage", "V" end
-  return {}, nil, ""
-end
-
-local lista, tipo, unidade = medidor()
+local lista, tipo, unidade = pgapi.escolherMedidor(scan, cfg.medidor)
 
 local function geracao()
   if not tipo then return 0 end
@@ -2414,15 +2642,7 @@ end
 
 -- quantos paineis existem no bearing. 0 = nao sei, e ai o painel usa so a
 -- referencia empirica (o melhor ja registrado).
-local PAINEIS = 0
-if fs.exists("painel.cfg") then
-  local f = fs.open("painel.cfg", "r")
-  for linha in f.readLine do
-    local n = linha:match("^%s*paineis%s*=%s*(%d+)%s*$")
-    if n then PAINEIS = tonumber(n) end
-  end
-  f.close()
-end
+local PAINEIS = cfg.paineis or 0
 
 local pico, fase = 0, 0
 local sair = false
@@ -2494,8 +2714,8 @@ local function cartao(nome)
                                           r.pctNominal)
       linhas[#linhas + 1] = "  (100% nominal nao e atingivel)"
     else
-      linhas[#linhas + 1] = "ponha paineis=N em painel.cfg para"
-      linhas[#linhas + 1] = "  comparar com o catalogo"
+      linhas[#linhas + 1] = "rode 'configurar' e diga quantos paineis"
+      linhas[#linhas + 1] = "  tem para comparar com o catalogo"
     end
     local c = clima.avaliar(ger, pgapi.isDaytime())
     linhas[#linhas + 1] = ""
@@ -2595,7 +2815,10 @@ local function eventos()
     local e, a, b, c = os.pullEvent()
     if e == "key" then
       if a == keys.q then sair = true; return end
-      if a == keys.r then scan = pgapi.scan(); lista, tipo, unidade = medidor() end
+      if a == keys.r then
+        scan = pgapi.scan()
+        lista, tipo, unidade = pgapi.escolherMedidor(scan, cfg.medidor)
+      end
     elseif e == "monitor_touch" then
       -- b, c = coluna e linha tocadas, em celulas
       local nome = circuito.tocou(areas, b, c)
@@ -2626,6 +2849,228 @@ term.setTextColor(colors.white)
 term.clear()
 term.setCursorPos(1, 1)
 print("painel encerrado.")]=]
+ARQUIVOS["configurar.lua"] = [=[
+--[[ configurar - assistente que escreve o helios.cfg
+
+  Pergunta o que existe de verdade na rede (medidor, monitor, reles de
+  redstone) e escreve /helios.cfg. Depois disso nenhum outro programa do
+  HELIOS precisa saber onde as coisas estao - todos leem de config.lua.
+
+  Uso:  configurar
+]]
+
+local BASE = fs.getDir(shell.getRunningProgram())
+local function lib(n)
+  local p = fs.combine(BASE, n .. ".lua")
+  if not fs.exists(p) then error("falta " .. n .. ".lua", 0) end
+  return dofile(p)
+end
+
+local pgapi  = lib("pgapi")
+local ui     = lib("ui")
+local config = lib("config")
+
+local tela = ui.tela(term.current(), true)   -- direto: e um assistente de texto
+local C = tela.C
+
+local function titulo(s)
+  tela.destino.setBackgroundColor(C.fundo)
+  tela.destino.clear()
+  tela.destino.setCursorPos(1, 1)
+  tela:faixa(1, C.destaque)
+  tela:texto(2, 1, s, C.fundo, C.destaque)
+  tela.destino.setCursorPos(1, 3)
+end
+
+--- Menu de escolha simples, devolve o item escolhido (a tabela, nao o indice).
+local function escolher(titulo_, itens)
+  tela.destino.setBackgroundColor(C.fundo)
+  tela.destino.clear()
+  tela:faixa(1, C.destaque)
+  tela:texto(2, 1, "configurar HELIOS", C.fundo, C.destaque)
+  local i = tela:menu(4, itens, titulo_)
+  return i and itens[i] or nil
+end
+
+--- Pergunta sim/nao. Devolve boolean.
+local function perguntarSN(pergunta, padrao)
+  tela.destino.setCursorPos(1, tela.h - 1)
+  tela.destino.setBackgroundColor(C.fundo)
+  tela.destino.setTextColor(C.texto)
+  write(pergunta .. (padrao and " [S/n] " or " [s/N] "))
+  local resp = (read() or ""):lower()
+  if resp == "" then return padrao end
+  return resp:sub(1, 1) == "s"
+end
+
+--- Pergunta um numero. Devolve o numero, ou o padrao se vazio/invalido.
+local function perguntarNumero(pergunta, padrao)
+  tela.destino.setCursorPos(1, tela.h - 1)
+  tela.destino.setBackgroundColor(C.fundo)
+  tela.destino.setTextColor(C.texto)
+  write(pergunta .. " [" .. tostring(padrao) .. "] ")
+  local resp = tonumber(read())
+  return resp or padrao
+end
+
+-- ---------------------------------------------------------- teste de lado
+
+--- Acende um lado de cada vez no alvo escolhido, 2s cada, para o jogador ver
+-- qual redstone link/fio acende. Devolve nada - e so para observar.
+local function testarLados(saidaBase)
+  titulo("testando os lados")
+  tela:texto(2, 3, "Olhe o bloco e anote qual lado acende.", C.fraco)
+  tela:texto(2, 4, "Tecle Q para parar e escolher.", C.fraco)
+
+  local y = 6
+  for _, lado in ipairs(config.LADOS) do
+    tela:texto(2, y, "lado: " .. lado, C.destaque)
+    y = y + 1
+    for _, l in ipairs(config.LADOS) do
+      config.setBool({ rele = saidaBase.rele, lado = l }, false)
+    end
+    config.setBool({ rele = saidaBase.rele, lado = lado }, true)
+
+    local parar = false
+    parallel.waitForAny(
+      function() sleep(2) end,
+      function()
+        local _, k = os.pullEvent("key")
+        if k == keys.q then parar = true end
+      end
+    )
+    if parar then break end
+  end
+  for _, l in ipairs(config.LADOS) do
+    config.setBool({ rele = saidaBase.rele, lado = l }, false)
+  end
+end
+
+--- Escolhe o rele (computador ou um redstone_relay da rede) e o lado.
+-- @param permiteNenhum true para o cambio, que pode nao existir
+local function escolherSaida(nomeParte, scan, permiteNenhum)
+  local itens = { { rotulo = "Direto no computador", valor = config.COMPUTADOR } }
+  for _, r in ipairs(scan.relay) do
+    itens[#itens + 1] = { rotulo = "Redstone relay: " .. r.name, valor = r.name }
+  end
+  if permiteNenhum then
+    itens[#itens + 1] = { rotulo = "Nenhum (sem " .. nomeParte .. ")", valor = config.NENHUM }
+  end
+
+  local escolha = escolher("Onde esta a " .. nomeParte .. "?", itens)
+  if not escolha or escolha.valor == config.NENHUM then
+    return { rele = config.NENHUM, lado = "top" }
+  end
+
+  local rele = escolha.valor
+  if perguntarSN("Quer testar os lados agora?", true) then
+    testarLados({ rele = rele })
+  end
+
+  local ladoItens = {}
+  for _, l in ipairs(config.LADOS) do ladoItens[#ladoItens + 1] = { rotulo = l, valor = l } end
+  local ladoEsc = escolher("Qual lado e a " .. nomeParte .. "?", ladoItens)
+  local lado = ladoEsc and ladoEsc.valor or "top"
+
+  return { rele = rele, lado = lado }
+end
+
+-- ------------------------------------------------------------------ etapas
+
+local function passoMedidor(scan, cfg)
+  local itens = { { rotulo = "Automatico (recomendado)", valor = config.AUTO } }
+  for _, cat in ipairs(pgapi.MEDIDORES) do
+    for _, e in ipairs(scan[cat]) do
+      itens[#itens + 1] = { rotulo = e.name .. "  (" .. cat .. ")", valor = e.name }
+    end
+  end
+  if #itens == 1 then
+    tela:texto(2, tela.h - 2, "nenhum medidor visto ainda - deixando automatico", C.atencao)
+    sleep(2)
+  end
+  local esc = escolher("Qual medidor acompanha o painel?", itens)
+  cfg.medidor = esc and esc.valor or config.AUTO
+end
+
+local function passoMonitor(scan, cfg)
+  local itens = {
+    { rotulo = "Automatico (primeiro encontrado)", valor = config.AUTO },
+    { rotulo = "Nenhum (so a tela do computador)", valor = config.NENHUM },
+  }
+  for _, m in ipairs(scan.monitor) do
+    -- pgapi.try devolve so um valor; getSize devolve dois, entao chama direto
+    local ok, w, h = pcall(m.dev.getSize)
+    itens[#itens + 1] = { rotulo = m.name .. ((ok and w) and ("  " .. w .. "x" .. h) or ""),
+                           valor = m.name }
+  end
+  local esc = escolher("Qual monitor usar?", itens)
+  cfg.monitor = esc and esc.valor or config.AUTO
+end
+
+local function passoEmbreagem(scan, cfg)
+  local s = escolherSaida("embreagem (Clutch)", scan, false)
+  cfg.embreagem.rele = s.rele
+  cfg.embreagem.lado = s.lado
+  cfg.embreagem.invertida = perguntarSN("Ha uma tocha invertendo o sinal?", false)
+  cfg.embreagem.analogica = perguntarSN("E um Generator Clutch (sinal analogico)?", false)
+  if cfg.embreagem.analogica then
+    cfg.embreagem.nivelGiro = perguntarNumero("Nivel ao girar (0=total, 15=parado)", 0)
+  end
+end
+
+local function passoCambio(scan, cfg)
+  local s = escolherSaida("cambio (Gearshift)", scan, true)
+  cfg.cambio.rele = s.rele
+  cfg.cambio.lado = s.lado
+end
+
+local function passoPaineis(cfg)
+  cfg.paineis = perguntarNumero("Quantos paineis no bearing? (0 = nao sei)", cfg.paineis or 0)
+end
+
+-- ------------------------------------------------------------------ principal
+
+local function principal()
+  local scan = pgapi.scan()
+  local cfg = config.ler()
+
+  titulo("bem-vindo")
+  tela:texto(2, 3, "Vou perguntar onde cada coisa esta ligada.", C.texto)
+  tela:texto(2, 4, "As respostas ficam em /helios.cfg.", C.fraco)
+  tela:texto(2, 6, "Perifericos vistos agora:", C.destaque)
+  local y = 7
+  for _, cat in ipairs({ "power", "current", "voltage", "battery", "monitor", "relay" }) do
+    tela:texto(2, y, "  " .. cat .. ": " .. #scan[cat], C.fraco)
+    y = y + 1
+  end
+  tela:texto(2, y + 1, "tecle algo para comecar", C.fraco)
+  os.pullEvent("key")
+
+  passoMedidor(scan, cfg)
+  passoMonitor(scan, cfg)
+  passoEmbreagem(scan, cfg)
+  passoCambio(scan, cfg)
+  passoPaineis(cfg)
+
+  config.salvar(cfg)
+
+  titulo("pronto")
+  tela:texto(2, 3, "Configuracao salva em /helios.cfg", C.bom)
+  tela:texto(2, 5, "medidor:   " .. tostring(cfg.medidor), C.texto)
+  tela:texto(2, 6, "monitor:   " .. tostring(cfg.monitor), C.texto)
+  tela:texto(2, 7, "embreagem: " .. config.descrever(cfg.embreagem), C.texto)
+  tela:texto(2, 8, "cambio:    " .. config.descrever(cfg.cambio), C.texto)
+  tela:texto(2, 9, "paineis:   " .. tostring(cfg.paineis), C.texto)
+  tela:texto(2, 11, "Rode 'suntrack testar' para conferir a montagem.", C.fraco)
+end
+
+local ok, err = pcall(principal)
+tela.destino.setBackgroundColor(colors.black)
+tela.destino.setTextColor(colors.white)
+if not ok then
+  print()
+  printError(err)
+end]=]
 ARQUIVOS["soldemo.lua"] = [=[
 --[[ soldemo - demonstracao da base grafica nova
 
@@ -2782,6 +3227,7 @@ local pgapi   = carregar("pgapi")
 local pixel   = carregar("pixel")
 local palette = carregar("palette")
 local boot    = carregar("boot")
+local config  = carregar("config")
 
 local tela = ui.tela(term.current())
 local C = tela.C
@@ -2828,18 +3274,20 @@ end
 local function etapas()
   local scan = pgapi.scan()
 
+  local cfg, origemCfg = config.ler()
+
   local function medidor()
-    local tipos = { { scan.power, "power gauge" },
-                    { scan.current, "current gauge" },
-                    { scan.voltage, "voltage gauge" } }
-    for i, t in ipairs(tipos) do
-      if #t[1] > 0 then
-        -- tensao serve, mas mal: a Voc do painel quase nao muda com a luz
-        return (i == 3) and "atencao" or "bom",
-               #t[1] .. "x " .. t[2] .. (i == 3 and " (fraco)" or "")
+    local lista, cat = pgapi.escolherMedidor(scan, cfg.medidor)
+    if #lista == 0 then
+      if cfg.medidor ~= config.AUTO and cfg.medidor ~= "" then
+        return "ruim", "\"" .. cfg.medidor .. "\" nao encontrado - rode configurar"
       end
+      return "ruim", "nenhum medidor na rede"
     end
-    return "ruim", "nenhum medidor na rede"
+    -- tensao serve, mas mal: a Voc do painel quase nao muda com a luz
+    local fraco = (cat == "voltage")
+    return fraco and "atencao" or "bom",
+           #lista .. "x " .. cat .. " gauge" .. (fraco and " (fraco)" or "")
   end
 
   local function baterias()
@@ -2855,23 +3303,21 @@ local function etapas()
 
   local function monitor()
     if #scan.monitor == 0 then return "fraco", "nenhum, painel usa esta tela" end
-    local w, h = scan.monitor[1].dev.getSize()
+    local m = pgapi.escolherMonitor(scan, cfg.monitor)
+    if not m then return "atencao", cfg.monitor .. " nao encontrado - rode configurar" end
+    local w, h = m.dev.getSize()
     return "bom", #scan.monitor .. "x  " .. w .. "x" .. h
   end
 
   local function embreagem()
-    -- le o lado configurado no suntrack.cfg, se existir
-    local lado = "back"
-    if fs.exists("suntrack.cfg") then
-      local f = fs.open("suntrack.cfg", "r")
-      for linha in f.readLine do
-        local l = linha:match("^%s*clutchSide%s*=%s*(%w+)%s*$")
-        if l then lado = l end
-      end
-      f.close()
-      return "bom", "lado " .. lado .. ", do cfg"
+    local desc = config.descrever(cfg.embreagem)
+    if origemCfg == "padrao" then
+      return "atencao", desc .. " (nunca configurado - rode configurar)"
     end
-    return "fraco", "sem cfg, usando " .. lado
+    if not config.saidaOk(cfg.embreagem) then
+      return "atencao", desc .. " (rele nao visto agora)"
+    end
+    return "bom", desc
   end
 
   local function rede()
@@ -2951,14 +3397,14 @@ local function menu(resultados)
     end
 
     local itens = {
-      { rotulo = "Painel visual",       dica = "painel" },
-      { rotulo = "Painel de energia",   dica = "pgmon" },
-      { rotulo = "Rastrear o sol",      dica = "suntrack" },
-      { rotulo = "Testar a montagem",   dica = "suntrack testar" },
-      { rotulo = "Descobrir os lados",  dica = "suntrack lados" },
-      { rotulo = "Diagnostico",         dica = "" },
-      { rotulo = "Rever o amanhecer",   dica = "" },
-      { rotulo = "Sair para o shell",   dica = "" },
+      { rotulo = "Configurar a montagem", dica = "configurar" },
+      { rotulo = "Painel visual",         dica = "painel" },
+      { rotulo = "Painel de energia",     dica = "pgmon" },
+      { rotulo = "Rastrear o sol",        dica = "suntrack" },
+      { rotulo = "Testar a montagem",     dica = "suntrack testar" },
+      { rotulo = "Diagnostico",           dica = "" },
+      { rotulo = "Rever o amanhecer",     dica = "" },
+      { rotulo = "Sair para o shell",     dica = "" },
     }
 
     tela:rodape(" setas move  enter escolhe  q sai ")
@@ -2968,11 +3414,13 @@ local function menu(resultados)
       tela:encerrar()
       print("HELIOS encerrado. Digite 'startup' para voltar.")
       return
-    elseif escolha == 1 then rodar("painel")
-    elseif escolha == 2 then rodar("pgmon")
-    elseif escolha == 3 then rodar("suntrack")
-    elseif escolha == 4 then rodar("suntrack", "testar")
-    elseif escolha == 5 then rodar("suntrack", "lados")
+    elseif escolha == 1 then
+      rodar("configurar")
+      resultados = checagem()
+    elseif escolha == 2 then rodar("painel")
+    elseif escolha == 3 then rodar("pgmon")
+    elseif escolha == 4 then rodar("suntrack")
+    elseif escolha == 5 then rodar("suntrack", "testar")
     elseif escolha == 7 then
       boot.rodar((telaDoBoot()), "completo", pixel, palette)
     elseif escolha == 6 then
@@ -3019,7 +3467,28 @@ parallel.waitForAny(
 -- se o usuario pulou no meio, a checagem nao chegou a devolver nada
 if not resultados then resultados = checagem() end
 
-menu(resultados)]=]
+-- ------------------------------------------- ponte com a Expresso Labs
+-- Opcional: sem ponte.lua instalado, nada aqui muda e o HELIOS roda igual.
+-- A ponte SO LE os medidores e manda para o servidor da empresa. Ela vive em
+-- paralelo com o menu, dentro de pcall - falha dela nunca derruba o HELIOS.
+local ponte
+if fs.exists(fs.combine(BASE, "ponte.lua")) then
+  local ok, m = pcall(dofile, fs.combine(BASE, "ponte.lua"))
+  if ok and type(m) == "table" then ponte = m end
+end
+
+if ponte then
+  parallel.waitForAny(
+    function() menu(resultados) end,
+    function()
+      pcall(ponte.rodar)
+      -- se a ponte morrer, ela dorme aqui: retornar fecharia o menu junto
+      while true do sleep(60) end
+    end
+  )
+else
+  menu(resultados)
+end]=]
 
 for _, nome in ipairs(ORDEM) do
   if fs.exists(nome) then fs.delete(nome) end
@@ -3029,4 +3498,6 @@ for _, nome in ipairs(ORDEM) do
   print("gravado: " .. nome)
 end
 print()
-print(#ORDEM .. " arquivos instalados. Ctrl+R para reiniciar.")
+print(#ORDEM .. " arquivos instalados.")
+print("Rode 'configurar' para dizer onde estao o medidor,")
+print("a embreagem e o cambio. Ctrl+R para reiniciar depois.")

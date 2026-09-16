@@ -22,6 +22,7 @@ local pgapi   = carregar("pgapi")
 local pixel   = carregar("pixel")
 local palette = carregar("palette")
 local boot    = carregar("boot")
+local config  = carregar("config")
 
 local tela = ui.tela(term.current())
 local C = tela.C
@@ -68,18 +69,20 @@ end
 local function etapas()
   local scan = pgapi.scan()
 
+  local cfg, origemCfg = config.ler()
+
   local function medidor()
-    local tipos = { { scan.power, "power gauge" },
-                    { scan.current, "current gauge" },
-                    { scan.voltage, "voltage gauge" } }
-    for i, t in ipairs(tipos) do
-      if #t[1] > 0 then
-        -- tensao serve, mas mal: a Voc do painel quase nao muda com a luz
-        return (i == 3) and "atencao" or "bom",
-               #t[1] .. "x " .. t[2] .. (i == 3 and " (fraco)" or "")
+    local lista, cat = pgapi.escolherMedidor(scan, cfg.medidor)
+    if #lista == 0 then
+      if cfg.medidor ~= config.AUTO and cfg.medidor ~= "" then
+        return "ruim", "\"" .. cfg.medidor .. "\" nao encontrado - rode configurar"
       end
+      return "ruim", "nenhum medidor na rede"
     end
-    return "ruim", "nenhum medidor na rede"
+    -- tensao serve, mas mal: a Voc do painel quase nao muda com a luz
+    local fraco = (cat == "voltage")
+    return fraco and "atencao" or "bom",
+           #lista .. "x " .. cat .. " gauge" .. (fraco and " (fraco)" or "")
   end
 
   local function baterias()
@@ -95,23 +98,21 @@ local function etapas()
 
   local function monitor()
     if #scan.monitor == 0 then return "fraco", "nenhum, painel usa esta tela" end
-    local w, h = scan.monitor[1].dev.getSize()
+    local m = pgapi.escolherMonitor(scan, cfg.monitor)
+    if not m then return "atencao", cfg.monitor .. " nao encontrado - rode configurar" end
+    local w, h = m.dev.getSize()
     return "bom", #scan.monitor .. "x  " .. w .. "x" .. h
   end
 
   local function embreagem()
-    -- le o lado configurado no suntrack.cfg, se existir
-    local lado = "back"
-    if fs.exists("suntrack.cfg") then
-      local f = fs.open("suntrack.cfg", "r")
-      for linha in f.readLine do
-        local l = linha:match("^%s*clutchSide%s*=%s*(%w+)%s*$")
-        if l then lado = l end
-      end
-      f.close()
-      return "bom", "lado " .. lado .. ", do cfg"
+    local desc = config.descrever(cfg.embreagem)
+    if origemCfg == "padrao" then
+      return "atencao", desc .. " (nunca configurado - rode configurar)"
     end
-    return "fraco", "sem cfg, usando " .. lado
+    if not config.saidaOk(cfg.embreagem) then
+      return "atencao", desc .. " (rele nao visto agora)"
+    end
+    return "bom", desc
   end
 
   local function rede()
@@ -191,14 +192,14 @@ local function menu(resultados)
     end
 
     local itens = {
-      { rotulo = "Painel visual",       dica = "painel" },
-      { rotulo = "Painel de energia",   dica = "pgmon" },
-      { rotulo = "Rastrear o sol",      dica = "suntrack" },
-      { rotulo = "Testar a montagem",   dica = "suntrack testar" },
-      { rotulo = "Descobrir os lados",  dica = "suntrack lados" },
-      { rotulo = "Diagnostico",         dica = "" },
-      { rotulo = "Rever o amanhecer",   dica = "" },
-      { rotulo = "Sair para o shell",   dica = "" },
+      { rotulo = "Configurar a montagem", dica = "configurar" },
+      { rotulo = "Painel visual",         dica = "painel" },
+      { rotulo = "Painel de energia",     dica = "pgmon" },
+      { rotulo = "Rastrear o sol",        dica = "suntrack" },
+      { rotulo = "Testar a montagem",     dica = "suntrack testar" },
+      { rotulo = "Diagnostico",           dica = "" },
+      { rotulo = "Rever o amanhecer",     dica = "" },
+      { rotulo = "Sair para o shell",     dica = "" },
     }
 
     tela:rodape(" setas move  enter escolhe  q sai ")
@@ -208,11 +209,13 @@ local function menu(resultados)
       tela:encerrar()
       print("HELIOS encerrado. Digite 'startup' para voltar.")
       return
-    elseif escolha == 1 then rodar("painel")
-    elseif escolha == 2 then rodar("pgmon")
-    elseif escolha == 3 then rodar("suntrack")
-    elseif escolha == 4 then rodar("suntrack", "testar")
-    elseif escolha == 5 then rodar("suntrack", "lados")
+    elseif escolha == 1 then
+      rodar("configurar")
+      resultados = checagem()
+    elseif escolha == 2 then rodar("painel")
+    elseif escolha == 3 then rodar("pgmon")
+    elseif escolha == 4 then rodar("suntrack")
+    elseif escolha == 5 then rodar("suntrack", "testar")
     elseif escolha == 7 then
       boot.rodar((telaDoBoot()), "completo", pixel, palette)
     elseif escolha == 6 then

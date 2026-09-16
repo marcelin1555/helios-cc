@@ -26,27 +26,24 @@ local palette  = lib("palette")
 local circuito = lib("circuito")
 local rendimento = lib("rendimento")
 local clima = lib("clima")
+local config = lib("config")
 
+local cfg = config.ler()
 local args = { ... }
 local scan = pgapi.scan()
 
 local tela = term.current()
-if args[1] ~= "pc" and #scan.monitor > 0 then
-  tela = scan.monitor[1].dev
-  pcall(tela.setTextScale, 0.5)
+if args[1] ~= "pc" then
+  local m = pgapi.escolherMonitor(scan, cfg.monitor)
+  if m then
+    tela = m.dev
+    pcall(tela.setTextScale, 0.5)
+  end
 end
 
 local fb = pixel.novo(tela)
 
---- Escolhe a melhor grandeza disponivel para representar a geracao.
-local function medidor()
-  if #scan.power > 0 then return scan.power, "power", "W" end
-  if #scan.current > 0 then return scan.current, "current", "A" end
-  if #scan.voltage > 0 then return scan.voltage, "voltage", "V" end
-  return {}, nil, ""
-end
-
-local lista, tipo, unidade = medidor()
+local lista, tipo, unidade = pgapi.escolherMedidor(scan, cfg.medidor)
 
 local function geracao()
   if not tipo then return 0 end
@@ -69,15 +66,7 @@ end
 
 -- quantos paineis existem no bearing. 0 = nao sei, e ai o painel usa so a
 -- referencia empirica (o melhor ja registrado).
-local PAINEIS = 0
-if fs.exists("painel.cfg") then
-  local f = fs.open("painel.cfg", "r")
-  for linha in f.readLine do
-    local n = linha:match("^%s*paineis%s*=%s*(%d+)%s*$")
-    if n then PAINEIS = tonumber(n) end
-  end
-  f.close()
-end
+local PAINEIS = cfg.paineis or 0
 
 local pico, fase = 0, 0
 local sair = false
@@ -149,8 +138,8 @@ local function cartao(nome)
                                           r.pctNominal)
       linhas[#linhas + 1] = "  (100% nominal nao e atingivel)"
     else
-      linhas[#linhas + 1] = "ponha paineis=N em painel.cfg para"
-      linhas[#linhas + 1] = "  comparar com o catalogo"
+      linhas[#linhas + 1] = "rode 'configurar' e diga quantos paineis"
+      linhas[#linhas + 1] = "  tem para comparar com o catalogo"
     end
     local c = clima.avaliar(ger, pgapi.isDaytime())
     linhas[#linhas + 1] = ""
@@ -250,7 +239,10 @@ local function eventos()
     local e, a, b, c = os.pullEvent()
     if e == "key" then
       if a == keys.q then sair = true; return end
-      if a == keys.r then scan = pgapi.scan(); lista, tipo, unidade = medidor() end
+      if a == keys.r then
+        scan = pgapi.scan()
+        lista, tipo, unidade = pgapi.escolherMedidor(scan, cfg.medidor)
+      end
     elseif e == "monitor_touch" then
       -- b, c = coluna e linha tocadas, em celulas
       local nome = circuito.tocou(areas, b, c)

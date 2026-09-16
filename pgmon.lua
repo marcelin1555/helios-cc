@@ -13,7 +13,8 @@ local function loadLib(name)
   error("Falta a biblioteca " .. name .. ".lua (coloque na mesma pasta)", 0)
 end
 
-local pgapi = loadLib("pgapi")
+local pgapi  = loadLib("pgapi")
+local config = loadLib("config")
 
 local REFRESH  = 0.5   -- segundos entre leituras
 local HIST_MAX = 300   -- amostras guardadas do historico de potencia
@@ -21,11 +22,14 @@ local HIST_MAX = 300   -- amostras guardadas do historico de potencia
 -- ------------------------------------------------------------------- display
 
 local args = { ... }
+local cfg = config.ler()
 local scan = pgapi.scan()
 
+local monitorEscolhido = pgapi.escolherMonitor(scan, cfg.monitor)
+
 local out, isMonitor
-if #scan.monitor > 0 then
-  out, isMonitor = scan.monitor[1].dev, true
+if monitorEscolhido then
+  out, isMonitor = monitorEscolhido.dev, true
   pcall(out.setTextScale, tonumber(args[1]) or 0.5)
 else
   out, isMonitor = term.current(), false

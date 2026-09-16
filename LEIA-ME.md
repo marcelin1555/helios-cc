@@ -1,4 +1,4 @@
-# Painel PowerGrid + rastreador solar (CC:Tweaked)
+# HELIOS — painel PowerGrid + rastreador solar (CC:Tweaked)
 
 Programas para o perfil *servidor de expresso* (CC:Tweaked 1.120.2 + PowerGrid 0.6.1).
 
@@ -7,6 +7,8 @@ Programas para o perfil *servidor de expresso* (CC:Tweaked 1.120.2 + PowerGrid 0
 | `startup.lua` | boot do sistema HELIOS: checagem de hardware + menu |
 | `pgapi.lua` | biblioteca: descobre e lê os periféricos do PowerGrid |
 | `ui.lua` | biblioteca de interface: telas, barras, menus |
+| `config.lua` | leitura/escrita de `helios.cfg` — o lugar único de configuração |
+| `configurar.lua` | assistente que descobre a rede e escreve `helios.cfg` |
 | `pgmon.lua` | painel de monitoramento num monitor |
 | `suntrack.lua` | rastreador solar automático |
 | `pixel.lua` | framebuffer subpixel 2×3 (triplica a resolução) |
@@ -18,6 +20,60 @@ Programas para o perfil *servidor de expresso* (CC:Tweaked 1.120.2 + PowerGrid 0
 | `clima.lua` | aprende a curva do dia e infere a condição do céu |
 | `soldemo.lua` | demo descartável, para conferir a base gráfica |
 | `install.lua` | instalador: contém todos os acima, num paste só |
+
+## Configuração — um lugar só
+
+Tudo que depende da **sua** montagem — qual medidor ler, onde estão a
+embreagem e o câmbio, qual monitor usar, quantos painéis existem — mora em
+`/helios.cfg`. Nenhum outro programa guarda ajuste próprio; todos leem daqui.
+
+O jeito fácil é rodar o assistente, que já lista o que existe na rede:
+
+```
+configurar
+```
+
+Ele pergunta, com listas de escolha:
+- **qual medidor** acompanha o painel (ou "automático");
+- **qual monitor** usar (ou "nenhum", para ficar só na tela do computador);
+- **onde está a embreagem** — direto no computador ou num Redstone Relay da
+  rede — com um teste que acende um lado por vez para você identificar;
+- **onde está o câmbio** (mesma escolha, ou "nenhum" se não tiver);
+- se a embreagem é invertida ou analógica (Generator Clutch);
+- **quantos painéis** tem, para comparar com o catálogo.
+
+O arquivo gerado é Lua comentado — dá para editar na mão com `edit helios.cfg`
+se preferir, ou ajustar um número sem rodar o assistente de novo.
+
+> Quem já tinha `suntrack.cfg`/`painel.cfg` (versão antiga) não perde a
+> montagem: na primeira leitura sem `helios.cfg`, o sistema converte os
+> arquivos antigos e já grava o novo — os antigos ficam só como histórico,
+> podem ser apagados.
+
+## Redstone pela rede — o equipamento para girar o painel
+
+A embreagem (Clutch) e o câmbio (Gearshift) do Create **não são periféricos**:
+um Wired Modem colado neles, sozinho, não expõe nada ao computador. O que os
+alcança de longe, pela mesma rede de cabo do medidor, é o
+**Redstone Relay** do próprio CC:Tweaked — um bloco com Wired Modem embutido
+que leva sinal de redstone pela rede.
+
+```
+computador ──cabo + wired modem──┬── Redstone Relay ── embreagem (Clutch)
+                                  ├── Redstone Relay ── câmbio (Gearshift)
+                                  └── Wired Modem ────── medidor
+```
+
+Cole um Redstone Relay em cada bloco (ou reaproveite um só, se dois lados dele
+alcançarem os dois blocos), ligue-os na mesma rede de cabo do medidor, e no
+`configurar` escolha o relay em vez de "direto no computador". Isso substitui
+qualquer solução sem fio (Redstone Link do Create) ou fio de redstone correndo
+pelo mapa — tudo vai pela mesma rede de cabo.
+
+Sem relay nenhum, ainda dá para usar **"direto no computador"**: aí o
+computador manda redstone nativo, e a embreagem precisa estar encostada nele
+ou ligada por fio de redstone comum (ou por Redstone Link, que também
+funciona, só que sem fio).
 
 ## A camada visual
 
@@ -41,13 +97,14 @@ toque.
 
 `startup.lua` roda sozinho quando o computador liga (é assim que o CC trata
 esse nome). Ele faz uma **checagem real** de hardware — modems, medidor,
-embreagem (lendo o seu `suntrack.cfg`), baterias e monitor — e depois abre um
-menu que chama os programas.
+embreagem (lendo o seu `helios.cfg`), baterias e monitor — e depois abre um
+menu que chama os programas, incluindo "Configurar a montagem".
 
 Segure qualquer tecla durante a animação para pular direto para o menu.
 
 A checagem não é enfeite: o que ela mostra é exatamente o que os programas vão
-encontrar. Se o `suntrack` fosse falhar por falta de medidor, o boot já avisa.
+encontrar. Se o `suntrack` fosse falhar por falta de medidor, o boot já avisa —
+e se a embreagem nunca foi configurada, ele diz para rodar `configurar`.
 
 ## Instalar
 
@@ -58,8 +115,8 @@ dentro do jogo:
 wget run https://raw.githubusercontent.com/marcelin1555/helios-cc/main/install.lua
 ```
 
-Isso grava todos os arquivos do sistema no computador, na ordem certa. Reinicie
-com `Ctrl+R` para ver o HELIOS subir.
+Isso grava todos os arquivos do sistema no computador, na ordem certa. Depois,
+rode `configurar` uma vez e reinicie com `Ctrl+R`.
 
 Funciona em qualquer mundo/servidor com a API `http` do CC habilitada — o
 `raw.githubusercontent.com` não pede autenticação, então serve tanto para o
@@ -70,7 +127,8 @@ salva o arquivo e depois `install` roda quantas vezes quiser.
 ### Atualizar
 
 Depois de mudar algo no repositório, rode o mesmo `wget run` de novo — ele
-sobrescreve os arquivos existentes.
+sobrescreve os arquivos existentes. O `helios.cfg` não é tocado pelo
+instalador, então a sua montagem não se perde numa atualização.
 
 ## O que o PowerGrid expõe ao computador
 
@@ -112,6 +170,9 @@ pgmon        escala 0.5 (padrão)
 pgmon 1      texto maior
 ```
 
+O monitor usado é o que estiver em `helios.cfg` (`configurar` deixa escolher);
+sem configuração, pega o primeiro monitor encontrado.
+
 Mostra geração total, baterias com barra e carga/descarga, medidores, geradores
 (RPM e modo), energia acumulada, e um gráfico do histórico de potência.
 
@@ -125,13 +186,13 @@ Tocar no monitor também re-varre.
 ```
    fonte de rotacao (RPM baixo, 8-16)
               |  eixo
-          Gearshift   <--- redstone do computador (inverte o sentido)
+          Gearshift   <--- redstone (rele ou nativo, configurado)
               |  eixo
-           Clutch     <--- redstone do computador (liga/desliga)
+           Clutch     <--- redstone (rele ou nativo, configurado)
               |  eixo
      Solar Panel Bearing  --gira-->  paineis solares
               |  saida eletrica
-        Power Gauge  --wired modem + cabo-->  computador
+        Current Gauge  --wired modem + cabo-->  computador
 ```
 
 1. **Fonte de rotação do Create** — motor, moinho, o que preferir. Use **RPM baixo,
@@ -140,38 +201,47 @@ Tocar no monitor também re-varre.
    sentido — é o que permite ao rastreador voltar quando passa do alvo.
 3. **Clutch** no eixo, depois do gearshift. Com redstone, corta a rotação.
 4. O eixo entra no **Solar Panel Bearing**, que gira os painéis.
-5. **Power Gauge** na saída elétrica do bearing, ligado ao computador com
-   **Wired Modem + Networking Cable** (clique no modem até acender).
-6. O computador precisa alcançar o clutch e o gearshift **com redstone** —
-   encostado, ou por fio saindo do lado configurado.
+5. Um **medidor** no circuito elétrico do bearing, ligado por **Wired Modem +
+   Networking Cable**. Prefira o **Current Gauge**: ele tem 2 terminais e vai
+   em série, enquanto o Power Gauge tem 3 (shunt em série + referência de
+   tensão). Para rastrear o sol a corrente serve tão bem quanto a potência.
 
-O clutch e o gearshift **não** precisam de modem: o computador tem saída de
-redstone nativa. Só o medidor é periférico.
+   O medidor tem terminal **+** e **−**, e vai em série — a corrente entra pelo
+   `+` e sai pelo `−`. A cadeia fica assim:
+
+   ```
+   bearing +  ->  gauge +
+   gauge -    ->  bateria +
+   bateria -  ->  bearing -
+   ```
+
+   O circuito precisa estar **fechado**, com uma carga (bateria, resistor,
+   lâmpada) no caminho de volta ao bearing. Sem carga não circula corrente e o
+   medidor lê zero. Ligar os dois terminais do gauge no mesmo polo é
+   curto-circuito — o gauge tem resistência quase zero e queima.
+6. **Redstone Relay + Wired Modem** colado na embreagem, e outro no câmbio (ou
+   o mesmo relay, se dois lados dele alcançarem os dois blocos). Ligue-os na
+   mesma rede de cabo do medidor. Veja a seção **Redstone pela rede** acima.
+
+Depois de montar, rode `configurar` para dizer onde está cada coisa.
 
 ### Velocidade fina com Generator Clutch
 
 Segundo a [wiki](https://createpowergrid.miraheze.org/wiki/Generator), o
 **Generator Clutch** do PowerGrid entende sinal **analógico**: sinal cheio não
-passa rotação nenhuma, sinal parcial limita o torque. Se você usar um no lugar
-do Clutch do Create, ponha no `suntrack.cfg`:
-
-```
-clutchAnalog=1
-runLevel=8
-```
-
-`runLevel` é o nível enviado ao girar (0 = torque total, 8 ≈ metade). Isso deixa
-o painel girar mais devagar sem precisar baixar o RPM da fonte, o que dá passos
-mais finos. Com o Clutch comum do Create deixe `clutchAnalog=0` — ele é apenas
-liga/desliga.
+passa rotação nenhuma, sinal parcial limita o torque. No `configurar`, marque
+"é um Generator Clutch" e informe o nível ao girar (0 = torque total, 8 ≈
+metade). Isso deixa o painel girar mais devagar sem precisar baixar o RPM da
+fonte, o que dá passos mais finos. Com o Clutch comum do Create, deixe
+desmarcado — ele é apenas liga/desliga.
 
 ### Estado seguro
 
 O Clutch do Create para quando **recebe** redstone. Então, com o computador
 desligado, o padrão é o painel girar sem parar. Se isso incomodar, ponha uma
-tocha de redstone invertendo o sinal entre o computador e o clutch, e ponha
-`invertClutch=1` no `suntrack.cfg` — aí "computador desligado" passa a
-significar "painel travado".
+tocha de redstone invertendo o sinal entre o relé (ou o computador) e o
+clutch, e marque "há uma tocha invertendo o sinal" no `configurar` — aí
+"computador desligado" passa a significar "painel travado".
 
 ### Como acha a melhor posição
 
@@ -181,10 +251,19 @@ realimentação — *perturb & observe*, o mesmo método dos rastreadores solare
 - **Amanhecer:** varredura completa de uma volta, guardando o pico visto. Depois
   gira até voltar a 95% desse pico. Isso acha o máximo global, não um local.
 - **Durante o dia:** a cada 8 s confere. Se estiver bom, dá um passo curto e mede;
-  se piorou mais que a banda morta de 2%, inverte o sentido (com gearshift) ou
-  segue em frente até dar a volta (sem gearshift).
-- **Queda grande** (12% abaixo do pico do dia): confere de novo 2 s depois antes de
-  sair girando — chuva e nuvem derrubam a geração sem o painel ter saído do lugar.
+  se piorou mais que a banda morta de 2%, inverte o sentido (com câmbio) ou
+  segue em frente até dar a volta (sem câmbio).
+- **Queda grande** (35% abaixo do pico do dia): confere de novo antes de sair
+  girando, e só varre de novo se a queda persistir por 3 leituras seguidas **e**
+  já tiver passado o tempo mínimo entre buscas (90 s por padrão). Um gatilho
+  baixo (12%, testado antes) disparava à toa toda manhã e tarde, quando a queda
+  é só o sol baixo no céu — girar não traz essa energia de volta.
+- **Chuva:** se a curva do dia já foi aprendida (ver `clima.lua` abaixo) e a
+  geração está muito abaixo do normal daquela hora, o rastreador entende que o
+  problema é o céu, não o ângulo, e **não gira** — só espera.
+- **Bateria cheia:** a corrente cai porque a tensão da bateria encostou na do
+  painel, não porque ele saiu de posição. O rastreador trava e não sai
+  procurando.
 - **Noite:** painel travado, confere a cada 20 s até amanhecer.
 
 O alvo decai 0,1% por ciclo de propósito, senão a queda natural do fim de tarde
@@ -193,7 +272,8 @@ faria o programa rearmar a busca sem parar.
 ### Uso
 
 ```
-suntrack testar    confere a montagem - rode este primeiro
+configurar         assistente que descobre a rede e escreve helios.cfg
+suntrack testar    confere a montagem - rode isso depois de configurar
 suntrack           roda o rastreador
 suntrack varrer    da uma volta medindo e mostra o pico
 suntrack parar     trava o painel e sai
@@ -202,25 +282,12 @@ suntrack parar     trava o painel e sai
 `Q` encerra. O painel é travado ao sair em qualquer caminho — inclusive se o
 programa quebrar — senão ficaria girando para sempre.
 
-### Ajustes
+### Ajustes finos
 
-Crie um `suntrack.cfg` ao lado, uma chave por linha:
-
-```
-clutchSide=back
-gearSide=right
-sweepTime=35
-```
-
-`clutchSide` e `gearSide` são os lados do computador (`top`, `bottom`, `left`,
-`right`, `front`, `back`). Deixe `gearSide` de fora se não usar gearshift.
-
-`sweepTime` é quanto tempo o bearing leva para dar uma volta completa — rode
-`suntrack varrer` e cronometre.
-
-Outros: `pulse` duração do passo fino, `settle` espera antes de medir, `samples`
-leituras promediadas, `deadband` banda morta, `reacquire` queda que dispara nova
-busca, `nightPower` watts abaixo do qual conta como sem sol, `invertClutch`.
+Os números de `rastreio` em `helios.cfg` (pulso, banda morta, tempo de
+varredura etc.) dão para editar na mão com `edit helios.cfg` — o arquivo é
+comentado. O mais importante é `volta`: quanto tempo o bearing leva para dar
+uma volta completa. Rode `suntrack varrer` e cronometre para acertar o número.
 
 ## Aprendizado diário e clima
 
@@ -254,10 +321,9 @@ média dos anteriores.
 
 ## Rodar sozinho ao ligar
 
-Para o painel subir junto com o computador, crie um `startup.lua`:
+`startup.lua` já é o que sobe sozinho — é o próprio HELIOS. Se quiser que o
+menu abra direto no painel visual em vez de esperar escolha, edite o item 1 do
+menu em `startup.lua` para chamar `painel` automaticamente.
 
-```lua
-shell.run("pgmon")
-```
-
-Para o rastreador, use outro computador (os dois são laços infinitos).
+Para rodar o rastreador *e* o painel visual ao mesmo tempo, use dois
+computadores — os dois são laços infinitos e não dividem tela.
