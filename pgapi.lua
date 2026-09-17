@@ -87,13 +87,31 @@ function pgapi.scan()
   return out
 end
 
+-- Nomes de metodo candidatos por categoria, na ordem em que tentamos. O
+-- ammeter/voltmeter/powermeter novos do PowerGrid nao tem getValue() nem
+-- rangePercentage() - so um getter proprio (ex: getAmperage()). Por isso
+-- tentamos varios nomes em vez de supor um so; o primeiro que existir e
+-- nao der erro vence.
+local CANDIDATOS = {
+  current = { "current", "getCurrent", "getAmperage", "getAmps", "getValue" },
+  voltage = { "voltage", "getVoltage", "getVolts", "getValue" },
+  power   = { "power", "getPower", "getWattage", "getWatts", "getValue" },
+}
+
+--- Tenta cada metodo da lista ate um devolver um numero.
+local function primeiroValor(d, nomes)
+  for _, nome in ipairs(nomes) do
+    local v = pgapi.try(d, nome)
+    if type(v) == "number" then return v end
+  end
+  return nil
+end
+
 --- Le um medidor (voltage/current/power) de forma uniforme.
 -- @return { value=, max=, pct=, unit= } ou nil
 function pgapi.readGauge(entry, cat)
   local d = entry.dev
-  local getter = ({ voltage = "voltage", current = "current", power = "power" })[cat]
-  local value = pgapi.try(d, getter)
-  if value == nil then value = pgapi.try(d, "getValue") end
+  local value = primeiroValor(d, CANDIDATOS[cat] or { "getValue" })
   if value == nil then return nil end
 
   local max  = pgapi.try(d, "maxRange")
