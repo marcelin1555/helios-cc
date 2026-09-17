@@ -40,9 +40,21 @@ pgapi.TYPE = {
 -- corrente acompanham a irradiancia; tensao quase nao muda com a luz)
 pgapi.MEDIDORES = { "power", "current", "voltage" }
 
+-- PowerGrid renomeou os medidores numa atualizacao (Gauge -> ammeter /
+-- voltmeter / powermeter), sem mudar a versao no mods.toml. O tipo do
+-- periferico muda, mas a API Lua (voltage()/current()/power(), getValue(),
+-- maxRange(), rangePercentage()) parece a mesma. Aceita os dois nomes na
+-- mesma categoria, para funcionar com blocos antigos e novos juntos.
+pgapi.APELIDOS = {
+  ammeter    = "current",
+  voltmeter  = "voltage",
+  powermeter = "power",
+}
+
 -- categoria por tipo, para a varredura
 local CAT = {}
 for cat, t in pairs(pgapi.TYPE) do CAT[t] = cat end
+for t, cat in pairs(pgapi.APELIDOS) do CAT[t] = cat end
 
 --- Chamada tolerante a falha: o bloco pode ter sido quebrado entre ticks.
 -- @return valor ou nil
