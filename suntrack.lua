@@ -397,7 +397,16 @@ if cmd == "testar" then
   print()
   print("variacao da geracao durante o giro: " .. pgapi.fmt(maxv - minv, meterUnit))
   print()
-  if parado > 0 and (maxv - minv) < parado * 0.02 then
+  if maxv <= 0 then
+    -- nunca leu nada, nem parado nem girando - "quase nao mudou" nao
+    -- detecta isso porque a comparacao e contra parado, que tambem e zero
+    print("Nao vi geracao nenhuma, nem parado nem girando.")
+    print(" - e de dia? Sem sol nao ha o que medir.")
+    print(" - o circuito eletrico do bearing esta fechado, com uma")
+    print("   carga (bateria/resistor) no caminho de volta?")
+    print(" - os terminais + e - do medidor estao no lugar certo?")
+    print(" - o painel realmente girou? Olhe de novo.")
+  elseif parado > 0 and (maxv - minv) < parado * 0.02 then
     print("A geracao quase nao mudou. Provaveis causas:")
     print(" - o painel nao girou: falta torque chegando ao bearing,")
     print("   ou a embreagem esta no rele/lado errado")

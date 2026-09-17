@@ -92,13 +92,31 @@ function pgapi.scan()
   return out
 end
 
+-- Nomes de metodo candidatos por categoria, na ordem em que tentamos. O
+-- ammeter/voltmeter/powermeter novos do PowerGrid nao tem getValue() nem
+-- rangePercentage() - so um getter proprio (ex: getAmperage()). Por isso
+-- tentamos varios nomes em vez de supor um so; o primeiro que existir e
+-- nao der erro vence.
+local CANDIDATOS = {
+  current = { "current", "getCurrent", "getAmperage", "getAmps", "getValue" },
+  voltage = { "voltage", "getVoltage", "getVolts", "getValue" },
+  power   = { "power", "getPower", "getWattage", "getWatts", "getValue" },
+}
+
+--- Tenta cada metodo da lista ate um devolver um numero.
+local function primeiroValor(d, nomes)
+  for _, nome in ipairs(nomes) do
+    local v = pgapi.try(d, nome)
+    if type(v) == "number" then return v end
+  end
+  return nil
+end
+
 --- Le um medidor (voltage/current/power) de forma uniforme.
 -- @return { value=, max=, pct=, unit= } ou nil
 function pgapi.readGauge(entry, cat)
   local d = entry.dev
-  local getter = ({ voltage = "voltage", current = "current", power = "power" })[cat]
-  local value = pgapi.try(d, getter)
-  if value == nil then value = pgapi.try(d, "getValue") end
+  local value = primeiroValor(d, CANDIDATOS[cat] or { "getValue" })
   if value == nil then return nil end
 
   local max  = pgapi.try(d, "maxRange")
@@ -2435,7 +2453,16 @@ if cmd == "testar" then
   print()
   print("variacao da geracao durante o giro: " .. pgapi.fmt(maxv - minv, meterUnit))
   print()
-  if parado > 0 and (maxv - minv) < parado * 0.02 then
+  if maxv <= 0 then
+    -- nunca leu nada, nem parado nem girando - "quase nao mudou" nao
+    -- detecta isso porque a comparacao e contra parado, que tambem e zero
+    print("Nao vi geracao nenhuma, nem parado nem girando.")
+    print(" - e de dia? Sem sol nao ha o que medir.")
+    print(" - o circuito eletrico do bearing esta fechado, com uma")
+    print("   carga (bateria/resistor) no caminho de volta?")
+    print(" - os terminais + e - do medidor estao no lugar certo?")
+    print(" - o painel realmente girou? Olhe de novo.")
+  elseif parado > 0 and (maxv - minv) < parado * 0.02 then
     print("A geracao quase nao mudou. Provaveis causas:")
     print(" - o painel nao girou: falta torque chegando ao bearing,")
     print("   ou a embreagem esta no rele/lado errado")
